@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sdo-bot"
+version = "1.0.0"
+description = "Telegram-бот для СДО РТУ МИРЭА (online-edu.mirea.ru): контрольные, сроки, новые материалы и оценки"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+  # Telegram: де-факто стандарт для асинхронных ботов на Python
+  "aiogram>=3.31,<4",
+  # Вход через SSO МИРЭА (Keycloak + код из почты + шаг «МАКС») и шифрование сессий.
+  # Тянет httpx, beautifulsoup4 и cryptography — их же использует и сам бот.
+  "pymirea>=0.3.3,<0.5",
+  "aiosqlite>=0.20,<1",
+  "pydantic-settings>=2.7,<3",
+]
+
+[project.optional-dependencies]
+# Нужен только если до Telegram приходится ходить через прокси (TELEGRAM_PROXY)
+proxy = ["aiohttp-socks>=0.10,<1"]
+dev = ["pytest>=8", "anyio>=4", "ruff>=0.8"]
+
+[project.scripts]
+sdo-bot = "sdo_bot.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sdo_bot"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "RUF"]
+# Проект русскоязычный: кириллица в строках и комментариях — норма, а не опечатка
+ignore = ["RUF001", "RUF002", "RUF003"]

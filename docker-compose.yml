@@ -1,0 +1,16 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # Именованный том: права на запись у пользователя контейнера есть сразу
+      - bot-data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  bot-data:
