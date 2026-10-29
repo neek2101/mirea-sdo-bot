@@ -90,6 +90,11 @@ class FakeMoodle:
     courses: list[dict[str, Any]] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
     contents: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
+    # Учебная группа студента и её состав: (id в СДО, ФИО)
+    group: str = "УИБО-09-25"
+    roster: list[tuple[int, str]] = field(
+        default_factory=lambda: [(7, "Иванов Иван Иванович"), (8, "Петров Пётр Петрович")]
+    )
     overview: list[tuple[int, str, str]] = field(default_factory=list)
     reports: dict[int, str] = field(default_factory=dict)
     notifications: list[dict[str, Any]] = field(default_factory=list)
@@ -128,6 +133,10 @@ class FakeMoodle:
             return httpx.Response(
                 200, text=f'<script>M.cfg = {{"sesskey":"{self.sesskey}"}};</script><h1>Dashboard</h1>'
             )
+        if path == "/user/index.php":  # участники курса: фильтр групп и таблица
+            if not logged_in:
+                return httpx.Response(303, headers={"location": f"{MOODLE}/login/index.php"})
+            return httpx.Response(200, text=participants_html(self.group, self.roster, "group" in url.params))
         if path == "/user/profile.php":
             if not logged_in:
                 return httpx.Response(303, headers={"location": f"{MOODLE}/login/index.php"})
@@ -292,3 +301,21 @@ def _cookies(request: httpx.Request) -> dict[str, str]:
             k, v = part.strip().split("=", 1)
             out[k] = v
     return out
+
+
+def participants_html(group: str, roster: list[tuple[int, str]], with_rows: bool) -> str:
+    """Страница участников курса: в фильтре видна только своя группа (раздельные группы)."""
+    rows = ""
+    if with_rows:
+        for uid, name in roster:
+            rows += (
+                f'<tr><td class="cell c0"></td><th class="cell c1">'
+                f'<a href="{MOODLE}/user/view.php?id={uid}&course=10">'
+                f'<span class="userinitials">ИИ</span>{name}</a>'
+                f'</th><td class="cell c2">25У1</td><td class="cell c4">{group}</td><td>Студент</td></tr>'
+            )
+        rows += '<tr class="emptyrow"><td></td></tr>'
+    return (
+        f'<select data-field-name="groups"><option value="501">{group}</option></select>'
+        f'<table id="participants"><tbody>{rows}</tbody></table>'
+    )

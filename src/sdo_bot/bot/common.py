@@ -9,7 +9,7 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 from ..render import fmt_hours
-from ..storage import REMINDER_CHOICES, UserSettings
+from ..storage import REMINDER_CHOICES, Storage, UserSettings
 
 BTN_DEADLINES = "Все дедлайны"
 BTN_BY_COURSE = "Дедлайны по предметам"
@@ -18,9 +18,21 @@ BTN_SYNC = "Обновить"
 BTN_SETTINGS = "Настройки"
 BTN_IDEAS = "Идеи и предложения"
 BTN_HELP = "Помощь"
+BTN_STAROSTA = "Для старост"
+BTN_GROUP_PANEL = "Панель группы"
 GITHUB_URL = "https://github.com/neek2101/mirea-sdo-bot"
 MENU_BUTTONS = frozenset(
-    {BTN_DEADLINES, BTN_BY_COURSE, BTN_GRADES, BTN_SYNC, BTN_IDEAS, BTN_SETTINGS, BTN_HELP}
+    {
+        BTN_DEADLINES,
+        BTN_BY_COURSE,
+        BTN_GRADES,
+        BTN_SYNC,
+        BTN_IDEAS,
+        BTN_SETTINGS,
+        BTN_HELP,
+        BTN_STAROSTA,
+        BTN_GROUP_PANEL,
+    }
 )
 # Подписи прежней клавиатуры: у пользователей она остаётся, пока не придёт новая
 OLD_BUTTONS = {
@@ -42,6 +54,11 @@ HELP_TEXT = (
     f"{BTN_SYNC} — проверить СДО прямо сейчас\n"
     f"{BTN_SETTINGS} — какие уведомления присылать\n\n"
     f"{BTN_IDEAS} — предложить идею или проголосовать за чужие\n\n"
+    "<b>Старостам</b>: задания для своей группы со звёздочкой ⭐ в списках у одногруппников. "
+    f"Пока у группы нет старосты, в меню есть кнопка «{BTN_STAROSTA}»: там всё о разделе и заявка. "
+    "Старост согласовывает администратор "
+    "вручную по доказательству (например, фото списка группы в СДО, где видно, что ты староста). "
+    "Все заявки рассматривает один студент, поэтому ответ может прийти не сразу.\n\n"
     "/login — войти заново, /logout — выйти и удалить данные.\n\n"
     "🔒 Пароль я не храню: он нужен один раз, чтобы войти через единый вход МИРЭА. "
     "Сохраняется только зашифрованная сессия СДО.\n\n"
@@ -58,12 +75,29 @@ SETTINGS_LABELS = {
 }
 
 
-def main_menu() -> ReplyKeyboardMarkup:
+def main_menu(group_button: str | None = BTN_STAROSTA) -> ReplyKeyboardMarkup:
+    """group_button: «Для старост», «Панель группы» или None — когда у группы уже есть староста."""
     kb = ReplyKeyboardBuilder()
-    for text in (BTN_DEADLINES, BTN_BY_COURSE, BTN_GRADES, BTN_SYNC, BTN_IDEAS, BTN_SETTINGS, BTN_HELP):
+    buttons = [BTN_DEADLINES, BTN_BY_COURSE, BTN_GRADES, BTN_SYNC, BTN_IDEAS]
+    if group_button:
+        buttons.append(group_button)
+    for text in [*buttons, BTN_SETTINGS, BTN_HELP]:
         kb.button(text=text)
-    kb.adjust(2, 2, 2, 1)
+    kb.adjust(2)
     return kb.as_markup(resize_keyboard=True, is_persistent=True)
+
+
+async def user_menu(storage: Storage, tg_id: int) -> ReplyKeyboardMarkup:
+    """Меню под роль: староста и заместитель — «Панель группы»; в группе со старостой остальным
+    кнопка раздела не нужна; пока старосты нет — «Для старост» у всех."""
+    me = await storage.starosta(tg_id)
+    if me and me.status == "approved":
+        return main_menu(BTN_GROUP_PANEL)
+    user = await storage.get_user(tg_id)
+    if user and user.group_name:
+        if any(not r.is_deputy for r in await storage.starostas("approved", user.group_name)):
+            return main_menu(None)
+    return main_menu(BTN_STAROSTA)
 
 
 def login_button() -> InlineKeyboardMarkup:

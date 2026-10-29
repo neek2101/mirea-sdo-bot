@@ -19,7 +19,7 @@ from aiogram.methods import (
     SendMessage,
     TelegramMethod,
 )
-from aiogram.types import CallbackQuery, Chat, Message, Update, User
+from aiogram.types import CallbackQuery, Chat, Message, PhotoSize, Update, User
 
 from sdo_bot.app import App
 from sdo_bot.bot import build_dispatcher
@@ -95,13 +95,14 @@ async def env(storage, vault, sync, moodle):
     counter = itertools.count(1)
     user = User(id=TG, is_bot=False, first_name="Иван")
 
-    async def say(text: str) -> None:
+    async def say(text: str | None = None, *, photo: str | None = None) -> None:
         msg = Message(
             message_id=next(counter),
             date=datetime.now(),
             chat=Chat(id=TG, type="private"),
             from_user=user,
             text=text,
+            photo=[PhotoSize(file_id=photo, file_unique_id=photo, width=10, height=10)] if photo else None,
         )
         await dp.feed_update(bot, Update(update_id=next(counter), message=msg), app=app)
 

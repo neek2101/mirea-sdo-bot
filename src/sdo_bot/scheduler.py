@@ -185,6 +185,8 @@ class Scheduler:
         await self.notifier.deliver(tg_id)
 
     async def send_reminders(self) -> None:
+        if removed := await self.storage.purge_group_tasks(int(time.time())):
+            log.info("removed %s expired group tasks", removed)
         due = await self.sync.due_reminders()
         for tg_id in due:
             await self.notifier.deliver(tg_id)

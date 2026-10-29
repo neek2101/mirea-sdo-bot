@@ -18,7 +18,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from ..app import App
 from ..moodle import MoodleError, SessionExpired, StoredCookie
 from ..moodle.client import host_of
-from .common import HELP_TEXT, login_button, main_menu
+from .common import HELP_TEXT, login_button, user_menu
 
 log = logging.getLogger(__name__)
 
@@ -49,7 +49,9 @@ async def cmd_start(message: Message, app: App, state: FSMContext) -> None:
         await app.storage.set_state(user.tg_id, "active")
         user.state = "active"
     if user.state == "active":
-        await message.answer("Я на связи и слежу за СДО 👌", reply_markup=main_menu())
+        await message.answer(
+            "Я на связи и слежу за СДО 👌", reply_markup=await user_menu(app.storage, user.tg_id)
+        )
         return
     await message.answer(START_TEXT, reply_markup=login_button())
 
@@ -168,12 +170,12 @@ async def _finish(message: Message, app: App, cookies: list[StoredCookie], progr
     if result is None:
         await message.answer(
             "Данные пока не загрузились — попробую ещё раз при следующей проверке.",
-            reply_markup=main_menu(),
+            reply_markup=await user_menu(app.storage, tg_id),
         )
     elif result.initial:
-        await message.answer("Меню — внизу 👇", reply_markup=main_menu())
+        await message.answer("Меню — внизу 👇", reply_markup=await user_menu(app.storage, tg_id))
     else:
-        await message.answer("Снова на связи 👌", reply_markup=main_menu())
+        await message.answer("Снова на связи 👌", reply_markup=await user_menu(app.storage, tg_id))
 
 
 # ---- запасной вход по cookie ----------------------------------------------------------------
