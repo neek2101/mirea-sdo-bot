@@ -28,6 +28,7 @@ COMMANDS = [
     BotCommand(command="deadlines", description="Что нужно сдать"),
     BotCommand(command="subjects", description="Дедлайны по предметам"),
     BotCommand(command="grades", description="Баллы по дисциплинам"),
+    BotCommand(command="ideas", description="Идеи и предложения"),
     BotCommand(command="sync", description="Проверить СДО сейчас"),
     BotCommand(command="settings", description="Настройки уведомлений"),
     BotCommand(command="login", description="Войти в СДО"),

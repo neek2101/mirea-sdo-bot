@@ -12,6 +12,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.base import BaseSession
 from aiogram.enums import ParseMode
 from aiogram.methods import (
+    AnswerCallbackQuery,
     DeleteMessage,
     EditMessageReplyMarkup,
     EditMessageText,
@@ -275,3 +276,62 @@ async def test_stale_reminder_is_not_delivered_late(env, storage):
     await app.notifier.deliver(TG)
     assert not any("устарело" in t for t in session.texts())
     assert await storage.outbox(TG) == []
+
+
+# ---- идеи и предложения -----------------------------------------------------------------------
+
+
+async def test_ideas_propose_vote_and_spam_limits(env, storage, monkeypatch):
+    from sdo_bot.bot import ideas
+
+    session, say, press, _ = env
+    await say("/ideas")
+    assert "Пока ни одной идеи" in session.texts()[-1]
+    session.take()
+
+    await press("i:new")
+    assert "Опиши идею" in session.texts()[-1]
+    await say("коротко")
+    assert "Слишком коротко" in session.texts()[-1]
+    await say("Смотрите https://spam.example")
+    assert "Ссылки" in session.texts()[-1]
+    await say("Напоминать о парах за 10 минут до начала")
+    assert "Записала! Твоя идея #1" in "\n".join(session.texts())
+    session.take()
+
+    def answers() -> list[str]:
+        return [m.text for m in session.take() if isinstance(m, AnswerCallbackQuery) and m.text]
+
+    monkeypatch.setattr(ideas, "VOTE_INTERVAL", 0)
+    await press("i:v:1:1:0")
+    assert answers() == ["Голос +1 учтён"]
+    await press("i:v:1:-1:0")
+    edits = [m for m in session.requests if isinstance(m, EditMessageText)]
+    assert answers() == ["Голос −1 учтён"]
+    assert "рейтинг -1 (за 0, против 1)" in edits[-1].text
+    await press("i:v:1:-1:0")
+    assert answers() == ["Голос снят"]
+
+    monkeypatch.setattr(ideas, "VOTE_INTERVAL", 60)  # голос только что был — следующий отбрасываем
+    await press("i:v:1:1:0")
+    assert answers() == ["Не так быстро"]
+
+    # Сразу вторую идею нельзя: пауза между идеями
+    await press("i:new")
+    assert "Следующую идею можно предложить через" in session.texts()[-1]
+    session.take()
+
+    # Чужую идею удалить нельзя, свою — можно
+    other = await storage.add_idea(777, "Тёмная тема для расписания", "тёмная тема для расписания")
+    await say(f"/delidea {other}")
+    assert "только свою" in session.texts()[-1]
+    await say("/delidea 1")
+    assert "Удалила идею #1" in session.texts()[-1]
+
+
+async def test_menu_button_cancels_idea_input(env, storage):
+    session, say, press, _ = env
+    await press("i:new")
+    await say(BTN_DEADLINES)
+    assert "Отменила ввод идеи" in session.texts()[-1]
+    assert (await storage.ideas_page(TG, 0, 10))[1] == 0

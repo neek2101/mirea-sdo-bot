@@ -89,6 +89,21 @@ CREATE TABLE IF NOT EXISTS outbox (
     button_target TEXT,                            -- ссылка или callback_data
     expires_at  INTEGER NOT NULL
 );
+-- Идеи и предложения: общие для всех пользователей бота
+CREATE TABLE IF NOT EXISTS ideas (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    author_id   INTEGER,                           -- NULL — автор удалил свои данные
+    text        TEXT NOT NULL,
+    norm        TEXT NOT NULL,                     -- текст без регистра и знаков: ловим дубли
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ideas_author ON ideas (author_id, created_at);
+CREATE TABLE IF NOT EXISTS idea_votes (
+    idea_id INTEGER NOT NULL REFERENCES ideas(id) ON DELETE CASCADE,
+    tg_id   INTEGER NOT NULL,
+    value   INTEGER NOT NULL CHECK (value IN (-1, 1)),
+    PRIMARY KEY (idea_id, tg_id)
+);
 """
 
 DATA_TABLES = ("activities", "sent_marks", "modules", "known_courses", "grades", "outbox")
@@ -130,6 +145,20 @@ class User:
     fail_count: int
     last_notification_id: int | None
     settings: UserSettings
+
+
+@dataclass
+class Idea:
+    id: int
+    text: str
+    author_id: int | None
+    up: int
+    down: int
+    my_vote: int  # голос того, кто смотрит: 1, -1 или 0
+
+    @property
+    def score(self) -> int:
+        return self.up - self.down
 
 
 @dataclass
@@ -265,6 +294,81 @@ class Storage:
     async def delete_user(self, tg_id: int) -> None:
         async with self.transaction() as db:
             await db.execute("DELETE FROM users WHERE tg_id = ?", (tg_id,))
+            # Идеи остаются у всех, но без автора; свои голоса человек забирает
+            await db.execute("UPDATE ideas SET author_id = NULL WHERE author_id = ?", (tg_id,))
+            await db.execute("DELETE FROM idea_votes WHERE tg_id = ?", (tg_id,))
+
+    # ---- идеи ----------------------------------------------------------------------------
+
+    async def add_idea(self, author_id: int, text: str, norm: str) -> int:
+        async with self.transaction() as db:
+            cur = await db.execute(
+                "INSERT INTO ideas (author_id, text, norm, created_at) VALUES (?, ?, ?, ?)",
+                (author_id, text, norm, int(time.time())),
+            )
+            return int(cur.lastrowid or 0)
+
+    async def idea_by_norm(self, norm: str) -> int | None:
+        async with self.db.execute("SELECT id FROM ideas WHERE norm = ?", (norm,)) as cur:
+            row = await cur.fetchone()
+        return row["id"] if row else None
+
+    async def idea_author(self, idea_id: int) -> tuple[bool, int | None]:
+        """(идея существует, автор)."""
+        async with self.db.execute("SELECT author_id FROM ideas WHERE id = ?", (idea_id,)) as cur:
+            row = await cur.fetchone()
+        return (row is not None, row["author_id"] if row else None)
+
+    async def ideas_posted_since(self, author_id: int, since: int) -> list[int]:
+        """Время публикации идей автора начиная с `since`, новые первыми."""
+        async with self.db.execute(
+            "SELECT created_at FROM ideas WHERE author_id = ? AND created_at >= ? ORDER BY created_at DESC",
+            (author_id, since),
+        ) as cur:
+            return [r["created_at"] for r in await cur.fetchall()]
+
+    async def ideas_page(self, viewer: int, offset: int, limit: int) -> tuple[list[Idea], int]:
+        """Идеи по рейтингу (при равенстве — новые выше) и общее их число."""
+        async with self.db.execute(
+            """SELECT i.id, i.text, i.author_id,
+                      COALESCE(SUM(CASE WHEN v.value = 1 THEN 1 END), 0) AS up,
+                      COALESCE(SUM(CASE WHEN v.value = -1 THEN 1 END), 0) AS down,
+                      COALESCE(MAX(CASE WHEN v.tg_id = ? THEN v.value END), 0) AS mine
+               FROM ideas i LEFT JOIN idea_votes v ON v.idea_id = i.id
+               GROUP BY i.id
+               ORDER BY up - down DESC, i.created_at DESC, i.id DESC
+               LIMIT ? OFFSET ?""",
+            (viewer, limit, offset),
+        ) as cur:
+            rows = await cur.fetchall()
+        async with self.db.execute("SELECT COUNT(*) AS n FROM ideas") as cur:
+            total = (await cur.fetchone())["n"]
+        ideas = [Idea(r["id"], r["text"], r["author_id"], r["up"], r["down"], r["mine"]) for r in rows]
+        return ideas, total
+
+    async def vote_idea(self, idea_id: int, tg_id: int, value: int) -> int | None:
+        """Голос +1/-1; повторный такой же голос снимает его. Возвращает итоговый голос
+        пользователя (0 — снят) или None, если идеи уже нет."""
+        async with self.transaction() as db:
+            async with db.execute("SELECT 1 FROM ideas WHERE id = ?", (idea_id,)) as cur:
+                if await cur.fetchone() is None:
+                    return None
+            async with db.execute(
+                "SELECT value FROM idea_votes WHERE idea_id = ? AND tg_id = ?", (idea_id, tg_id)
+            ) as cur:
+                row = await cur.fetchone()
+            if row is not None and row["value"] == value:
+                await db.execute("DELETE FROM idea_votes WHERE idea_id = ? AND tg_id = ?", (idea_id, tg_id))
+                return 0
+            await db.execute(
+                "INSERT OR REPLACE INTO idea_votes (idea_id, tg_id, value) VALUES (?, ?, ?)",
+                (idea_id, tg_id, value),
+            )
+            return value
+
+    async def delete_idea(self, idea_id: int) -> None:
+        async with self.transaction() as db:
+            await db.execute("DELETE FROM ideas WHERE id = ?", (idea_id,))
 
     # ---- снимок СДО ----------------------------------------------------------------------
 
