@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import re
+from dataclasses import dataclass
 from urllib.parse import parse_qs, urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Tag
@@ -129,3 +130,46 @@ def parse_profile(html: str) -> tuple[int, str, str]:
         name = title.split(":")[0].strip()
     site = title.rsplit("|", 1)[1].strip() if "|" in title else ""
     return user_id, name, site
+
+
+# Учебная группа МИРЭА: «УИБО-09-25», «БАСО-01-25»…
+GROUP_RE = re.compile(r"^[А-ЯЁ]{2,6}-\d{2}-\d{2}$")
+
+
+@dataclass(frozen=True)
+class Participant:
+    moodle_id: int
+    full_name: str
+    group: str
+
+
+def parse_group_options(html: str) -> list[tuple[int, str]]:
+    """Группы из фильтра на странице участников курса (/user/index.php): (id группы курса, название).
+
+    В курсах с раздельными группами студент видит в фильтре только свою группу.
+    """
+    out = []
+    for opt in _soup(html).select("option"):
+        name = _text(opt)
+        value = str(opt.get("value") or "")
+        if GROUP_RE.match(name) and value.isdigit():
+            out.append((int(value), name))
+    return out
+
+
+def parse_participants(html: str) -> list[Participant]:
+    """Таблица участников курса: ссылка на профиль даёт id и ФИО, столбец группы — группу."""
+    people = []
+    for row in _soup(html).select("table#participants tbody tr"):
+        if "emptyrow" in (row.get("class") or []):
+            continue
+        a = row.select_one("a[href*='/user/view.php']")
+        uid = _query_int(str(a.get("href") or ""), "id") if a else None
+        if a is None or uid is None:
+            continue
+        for initials in a.select(".userinitials, img"):
+            initials.decompose()
+        cells = [_text(td) for td in row.find_all("td")]
+        group = next((c for c in cells if GROUP_RE.match(c)), "")
+        people.append(Participant(uid, _text(a), group))
+    return people

@@ -20,8 +20,9 @@ import aiosqlite
 from .moodle.models import Activity, Module
 from .outgoing import Outgoing
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 OUTBOX_TTL = 3 * 86400  # обычные сообщения живут в очереди трое суток
+GROUP_TASK_TTL = 86400  # задание старосты исчезает через сутки после срока
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -98,6 +99,29 @@ CREATE TABLE IF NOT EXISTS ideas (
     created_at  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ideas_author ON ideas (author_id, created_at);
+-- Старосты: заявка (pending) превращается в роль (approved) после одобрения администратором
+CREATE TABLE IF NOT EXISTS starostas (
+    tg_id        INTEGER PRIMARY KEY,
+    group_name   TEXT NOT NULL,
+    status       TEXT NOT NULL,                    -- pending | approved | rejected
+    requested_at INTEGER NOT NULL,
+    role         TEXT NOT NULL DEFAULT 'starosta', -- starosta | deputy (заместитель)
+    wants_deputy INTEGER                           -- ответ в заявке: есть ли заместитель (для админа)
+);
+-- Задания, которые староста поставил своей группе. Удаляются через сутки после срока.
+CREATE TABLE IF NOT EXISTS group_tasks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_name  TEXT NOT NULL,
+    author_tg   INTEGER NOT NULL,
+    author_name TEXT NOT NULL,                     -- «Фамилия Имя» на момент создания
+    course_id   INTEGER NOT NULL,                  -- 0 — без предмета
+    course_name TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    note        TEXT NOT NULL DEFAULT '',
+    deadline    INTEGER NOT NULL,
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS group_tasks_group ON group_tasks (group_name, deadline);
 CREATE TABLE IF NOT EXISTS idea_votes (
     idea_id INTEGER NOT NULL REFERENCES ideas(id) ON DELETE CASCADE,
     tg_id   INTEGER NOT NULL,
@@ -145,6 +169,50 @@ class User:
     fail_count: int
     last_notification_id: int | None
     settings: UserSettings
+    group_name: str | None = None
+    group_checked_at: int | None = None
+
+
+@dataclass
+class StarostaRole:
+    tg_id: int
+    group_name: str
+    status: str  # pending | approved | rejected
+    requested_at: int
+    role: str  # starosta | deputy
+    wants_deputy: bool | None
+    full_name: str | None
+
+    @property
+    def is_deputy(self) -> bool:
+        return self.role == "deputy"
+
+
+@dataclass
+class GroupTask:
+    id: int
+    group_name: str
+    author_tg: int
+    author_name: str
+    course_id: int
+    course_name: str
+    title: str
+    note: str
+    deadline: int
+
+    def as_activity(self) -> Activity:
+        return Activity(
+            key=f"group:{self.id}",
+            modname="group",
+            name=self.title,
+            course_id=self.course_id,
+            course_name=self.course_name,
+            url="",
+            close_ts=self.deadline,
+            author=self.author_name,
+            group=self.group_name,
+            note=self.note,
+        )
 
 
 @dataclass
@@ -216,6 +284,18 @@ class Storage:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA foreign_keys=ON")
         await db.executescript(SCHEMA)
+        # v2: учебная группа пользователя (определяется по СДО)
+        async with db.execute("PRAGMA table_info(users)") as cur:
+            columns = {r["name"] for r in await cur.fetchall()}
+        if "group_name" not in columns:
+            await db.execute("ALTER TABLE users ADD COLUMN group_name TEXT")
+            await db.execute("ALTER TABLE users ADD COLUMN group_checked_at INTEGER")
+        # v3: роль старосты/заместителя
+        async with db.execute("PRAGMA table_info(starostas)") as cur:
+            columns = {r["name"] for r in await cur.fetchall()}
+        if "role" not in columns:
+            await db.execute("ALTER TABLE starostas ADD COLUMN role TEXT NOT NULL DEFAULT 'starosta'")
+            await db.execute("ALTER TABLE starostas ADD COLUMN wants_deputy INTEGER")
         await db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         await db.commit()
         return cls(db)
@@ -297,6 +377,8 @@ class Storage:
             # Идеи остаются у всех, но без автора; свои голоса человек забирает
             await db.execute("UPDATE ideas SET author_id = NULL WHERE author_id = ?", (tg_id,))
             await db.execute("DELETE FROM idea_votes WHERE tg_id = ?", (tg_id,))
+            # Роль старосты привязана к человеку; его задания остаются у группы до своего срока
+            await db.execute("DELETE FROM starostas WHERE tg_id = ?", (tg_id,))
 
     # ---- идеи ----------------------------------------------------------------------------
 
@@ -369,6 +451,157 @@ class Storage:
     async def delete_idea(self, idea_id: int) -> None:
         async with self.transaction() as db:
             await db.execute("DELETE FROM ideas WHERE id = ?", (idea_id,))
+
+    # ---- группы и старосты ------------------------------------------------------------------
+
+    async def set_group(self, tg_id: int, group_name: str | None, checked_at: int) -> None:
+        """Записать группу. None — определить не удалось: прежнее значение не трогаем."""
+        async with self.transaction() as db:
+            await db.execute(
+                "UPDATE users SET group_name = COALESCE(?, group_name), group_checked_at = ? WHERE tg_id = ?",
+                (group_name, checked_at, tg_id),
+            )
+
+    async def group_members(self, group_name: str) -> list[User]:
+        """Пользователи бота из группы, которым можно писать."""
+        async with self.db.execute(
+            "SELECT * FROM users WHERE group_name = ? AND state = 'active'", (group_name,)
+        ) as cur:
+            return [_user(r) for r in await cur.fetchall()]
+
+    async def users_by_moodle_ids(self, moodle_ids: Iterable[int]) -> dict[int, User]:
+        ids = list(moodle_ids)
+        if not ids:
+            return {}
+        marks = ",".join("?" * len(ids))
+        async with self.db.execute(f"SELECT * FROM users WHERE moodle_user_id IN ({marks})", ids) as cur:
+            return {r["moodle_user_id"]: _user(r) for r in await cur.fetchall()}
+
+    async def starosta(self, tg_id: int) -> StarostaRole | None:
+        """Заявка или роль человека; None — он её не подавал."""
+        async with self.db.execute(
+            """SELECT s.*, u.full_name FROM starostas s LEFT JOIN users u ON u.tg_id = s.tg_id
+               WHERE s.tg_id = ?""",
+            (tg_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return _starosta(row) if row else None
+
+    async def approved_group(self, tg_id: int) -> str | None:
+        """Группа, в которой человек — одобренный староста или заместитель."""
+        found = await self.starosta(tg_id)
+        return found.group_name if found and found.status == "approved" else None
+
+    async def set_starosta(
+        self,
+        tg_id: int,
+        group_name: str,
+        status: str,
+        now: int,
+        *,
+        role: str = "starosta",
+        wants_deputy: bool | None = None,
+    ) -> None:
+        async with self.transaction() as db:
+            await db.execute(
+                """INSERT OR REPLACE INTO starostas
+                       (tg_id, group_name, status, requested_at, role, wants_deputy)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (tg_id, group_name, status, now, role, wants_deputy),
+            )
+
+    async def update_starosta_status(self, tg_id: int, status: str) -> None:
+        async with self.transaction() as db:
+            await db.execute("UPDATE starostas SET status = ? WHERE tg_id = ?", (status, tg_id))
+
+    async def delete_starosta(self, tg_id: int) -> None:
+        async with self.transaction() as db:
+            await db.execute("DELETE FROM starostas WHERE tg_id = ?", (tg_id,))
+
+    async def starostas(self, status: str = "approved", group_name: str | None = None) -> list[StarostaRole]:
+        """Заявки или роли по статусу (и группе), старосты раньше заместителей."""
+        sql = """SELECT s.*, u.full_name FROM starostas s LEFT JOIN users u ON u.tg_id = s.tg_id
+                 WHERE s.status = ?"""
+        args: tuple[str, ...] = (status,)
+        if group_name is not None:
+            sql += " AND s.group_name = ?"
+            args += (group_name,)
+        sql += " ORDER BY s.group_name, s.role DESC, u.full_name"
+        async with self.db.execute(sql, args) as cur:
+            return [_starosta(r) for r in await cur.fetchall()]
+
+    # ---- задания старост ------------------------------------------------------------------
+
+    async def add_group_task(
+        self,
+        group_name: str,
+        author_tg: int,
+        author_name: str,
+        course_id: int,
+        course_name: str,
+        title: str,
+        note: str,
+        deadline: int,
+    ) -> int:
+        async with self.transaction() as db:
+            cur = await db.execute(
+                """INSERT INTO group_tasks (group_name, author_tg, author_name, course_id, course_name,
+                                            title, note, deadline, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    group_name,
+                    author_tg,
+                    author_name,
+                    course_id,
+                    course_name,
+                    title,
+                    note,
+                    deadline,
+                    int(time.time()),
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    async def group_task(self, task_id: int) -> GroupTask | None:
+        async with self.db.execute("SELECT * FROM group_tasks WHERE id = ?", (task_id,)) as cur:
+            row = await cur.fetchone()
+        return _group_task(row) if row else None
+
+    async def update_group_task(self, task_id: int, **fields: str | int) -> None:
+        allowed = {"course_id", "course_name", "title", "note", "deadline"}
+        assert fields and set(fields) <= allowed, fields
+        assignments = ", ".join(f"{k} = ?" for k in fields)
+        async with self.transaction() as db:
+            await db.execute(
+                f"UPDATE group_tasks SET {assignments} WHERE id = ?", (*fields.values(), task_id)
+            )
+
+    async def delete_group_task(self, task_id: int) -> None:
+        async with self.transaction() as db:
+            await db.execute("DELETE FROM group_tasks WHERE id = ?", (task_id,))
+
+    async def group_tasks(self, group_name: str, now: int) -> list[GroupTask]:
+        """Задания группы, которые ещё не пора удалять (до суток после срока), по сроку."""
+        async with self.db.execute(
+            "SELECT * FROM group_tasks WHERE group_name = ? AND deadline > ? ORDER BY deadline, id",
+            (group_name, now - GROUP_TASK_TTL),
+        ) as cur:
+            return [_group_task(r) for r in await cur.fetchall()]
+
+    async def purge_group_tasks(self, now: int) -> int:
+        """Удалить задания, у которых срок прошёл больше суток назад."""
+        async with self.transaction() as db:
+            cur = await db.execute("DELETE FROM group_tasks WHERE deadline <= ?", (now - GROUP_TASK_TTL,))
+            return cur.rowcount
+
+    async def pending_group_activities(self, now: int) -> list[tuple[int, Activity]]:
+        """Будущие задания старост для каждого участника группы — для напоминаний."""
+        async with self.db.execute(
+            """SELECT u.tg_id, t.* FROM group_tasks t JOIN users u ON u.group_name = t.group_name
+               WHERE t.deadline > ? AND u.state = 'active' AND u.initialized = 1""",
+            (now,),
+        ) as cur:
+            return [(r["tg_id"], _group_task(r).as_activity()) for r in await cur.fetchall()]
 
     # ---- снимок СДО ----------------------------------------------------------------------
 
@@ -557,4 +790,33 @@ def _user(r: aiosqlite.Row) -> User:
         fail_count=r["fail_count"],
         last_notification_id=r["last_notification_id"],
         settings=UserSettings.from_json(r["settings"]),
+        group_name=r["group_name"],
+        group_checked_at=r["group_checked_at"],
+    )
+
+
+def _starosta(r: aiosqlite.Row) -> StarostaRole:
+    wants = r["wants_deputy"]
+    return StarostaRole(
+        tg_id=r["tg_id"],
+        group_name=r["group_name"],
+        status=r["status"],
+        requested_at=r["requested_at"],
+        role=r["role"],
+        wants_deputy=None if wants is None else bool(wants),
+        full_name=r["full_name"],
+    )
+
+
+def _group_task(r: aiosqlite.Row) -> GroupTask:
+    return GroupTask(
+        id=r["id"],
+        group_name=r["group_name"],
+        author_tg=r["author_tg"],
+        author_name=r["author_name"],
+        course_id=r["course_id"],
+        course_name=r["course_name"],
+        title=r["title"],
+        note=r["note"],
+        deadline=r["deadline"],
     )

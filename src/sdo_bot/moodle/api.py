@@ -13,7 +13,14 @@ from typing import Any
 
 from .client import MoodleClient, MoodleError, SessionExpired
 from .models import Activity, Course, CourseGrade, GradeItem, Module, Notification, SiteInfo
-from .parsers import parse_overview, parse_profile, parse_user_report
+from .parsers import (
+    Participant,
+    parse_group_options,
+    parse_overview,
+    parse_participants,
+    parse_profile,
+    parse_user_report,
+)
 
 EVENTS_PAGE = 50
 # Модули, у которых нет своей страницы (текст прямо на странице курса) — не «материалы»
@@ -90,6 +97,33 @@ class MoodleAPI:
     async def course_grade_items(self, course_id: int) -> list[GradeItem]:
         page = await self.client.get_page("/grade/report/user/index.php", {"id": course_id})
         return parse_user_report(page)
+
+    async def my_group(self, course_ids: list[int], tries: int = 5) -> str | None:
+        """Учебная группа студента. Функции групп через AJAX закрыты, поэтому смотрим фильтр
+        на странице участников: в курсах с раздельными группами там видна только своя группа."""
+        seen: dict[str, int] = {}
+        for cid in course_ids[:tries]:
+            page = await self.client.get_page("/user/index.php", {"id": cid, "perpage": 1})
+            groups = {name for _, name in parse_group_options(page)}
+            if len(groups) == 1:
+                name = groups.pop()
+                seen[name] = seen.get(name, 0) + 1
+                if seen[name] >= 2 or len(course_ids) == 1:
+                    return name
+        return max(seen, key=lambda k: seen[k]) if seen else None
+
+    async def group_roster(self, course_ids: list[int], group_name: str, tries: int = 5) -> list[Participant]:
+        """Студенты группы по странице участников первого курса, где эта группа есть в фильтре."""
+        for cid in course_ids[:tries]:
+            page = await self.client.get_page("/user/index.php", {"id": cid, "perpage": 1})
+            gid = next((g for g, name in parse_group_options(page) if name == group_name), None)
+            if gid is None:
+                continue
+            page = await self.client.get_page("/user/index.php", {"id": cid, "group": gid, "perpage": 300})
+            people = [p for p in parse_participants(page) if p.group in ("", group_name)]
+            if people:
+                return sorted(people, key=lambda p: p.full_name.casefold())
+        return []
 
     async def notifications(self, user_id: int, limit: int = 20) -> list[Notification]:
         d = await self.client.call(

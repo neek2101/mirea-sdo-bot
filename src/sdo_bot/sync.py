@@ -53,6 +53,9 @@ CMID_RE = re.compile(r"[?&]id=(\d+)")
 T = TypeVar("T")
 
 
+GROUP_RECHECK = 7 * 86400  # группу перепроверяем раз в неделю: вдруг перевёлся
+
+
 class NeedLogin(Exception):
     """Сохранённой сессии нет или она окончательно истекла."""
 
@@ -66,6 +69,8 @@ class Snapshot:
     overview: list[CourseGrade] | None = None
     reports: dict[int, list[GradeItem] | None] = field(default_factory=dict)
     notifications: list[Notification] | None = None
+    group: str | None = None
+    group_checked: bool = False  # группу проверяли в этом опросе
     errors: list[str] = field(default_factory=list)
 
 
@@ -164,6 +169,8 @@ class SyncService:
             initial = not user.initialized
             events, changes = diff(snap, state, user, now, initial)
             await self.storage.apply_sync(tg_id, changes, render_events(events, user.settings, now), now)
+            if snap.group_checked:
+                await self.storage.set_group(tg_id, snap.group, now)
             if snap.errors:
                 log.warning("user %s: partial sync: %s", tg_id, snap.errors)
             return SyncResult(events, initial, snap.errors)
@@ -206,6 +213,9 @@ class SyncService:
         user_id = snap.site.user_id if snap.site else user.moodle_user_id
         if user_id:
             snap.notifications = await attempt("уведомления", api.notifications(user_id))
+        if snap.courses and (user.group_name is None or now - (user.group_checked_at or 0) > GROUP_RECHECK):
+            snap.group = await attempt("группа", api.my_group([c.id for c in snap.courses]))
+            snap.group_checked = True
         return snap
 
     # ---- напоминания (без сети, по сохранённым данным) ------------------------------------
@@ -214,6 +224,8 @@ class SyncService:
         now = now or int(time.time())
         by_user: dict[int, list[Activity]] = defaultdict(list)
         for tg, a in await self.storage.pending_activities():
+            by_user[tg].append(a)
+        for tg, a in await self.storage.pending_group_activities(now):
             by_user[tg].append(a)
         result: dict[int, list[Event]] = {}
         for tg, acts in by_user.items():

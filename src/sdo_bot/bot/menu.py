@@ -38,8 +38,8 @@ from .common import (
     SETTINGS_LABELS,
     SETTINGS_TEXT,
     login_button,
-    main_menu,
     settings_keyboard,
+    user_menu,
 )
 
 log = logging.getLogger(__name__)
@@ -64,7 +64,10 @@ async def _pending(message: Message, app: App) -> tuple[User, list[Activity]] | 
         await message.answer("Ещё загружаю данные СДО, загляни через минуту.")
         return None
     stored = await app.storage.activities(user.tg_id)
-    return user, [s.activity for s in stored.values() if s.status == "pending"]
+    acts = [s.activity for s in stored.values() if s.status == "pending"]
+    if user.group_name:
+        acts += [t.as_activity() for t in await app.storage.group_tasks(user.group_name, int(time.time()))]
+    return user, acts
 
 
 async def show_deadlines(message: Message, app: App) -> None:
@@ -212,8 +215,8 @@ async def _session_lost(message: Message, app: App) -> None:
     await message.answer("⚠️ Сессия СДО закончилась, нужно войти заново.", reply_markup=login_button())
 
 
-async def show_help(message: Message) -> None:
-    await message.answer(HELP_TEXT, reply_markup=main_menu())
+async def show_help(message: Message, app: App) -> None:
+    await message.answer(HELP_TEXT, reply_markup=await user_menu(app.storage, message.chat.id))
 
 
 async def old_button(message: Message, app: App) -> None:
@@ -224,11 +227,16 @@ async def old_button(message: Message, app: App) -> None:
         await show_settings(message, app)
     else:
         await actions[new](message, app)
-    await message.answer("Кнопки меню обновились.", reply_markup=main_menu())
+    await message.answer(
+        "Кнопки меню обновились.", reply_markup=await user_menu(app.storage, message.chat.id)
+    )
 
 
-async def fallback(message: Message) -> None:
-    await message.answer("Не поняла. Пользуйся кнопками меню или /help.", reply_markup=main_menu())
+async def fallback(message: Message, app: App) -> None:
+    await message.answer(
+        "Не поняла. Пользуйся кнопками меню или /help.",
+        reply_markup=await user_menu(app.storage, message.chat.id),
+    )
 
 
 def build_router() -> Router:

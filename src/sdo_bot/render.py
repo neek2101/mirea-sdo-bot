@@ -43,7 +43,9 @@ MOD_ICONS = {
     "scorm": "🎓",
     "h5pactivity": "🎓",
     "bigbluebuttonbn": "🎥",
+    "group": "⭐",  # задание старосты
 }
+STAR = "⭐"
 
 
 # ---- общие куски -------------------------------------------------------------------------
@@ -82,14 +84,45 @@ def link(text: str, url: str) -> str:
 
 
 def kind_name(a: Activity) -> str:
-    return {"quiz": "тест", "assign": "задание"}.get(a.modname, "элемент курса")
+    return {"quiz": "тест", "assign": "задание", "group": "задание старосты"}.get(a.modname, "элемент курса")
+
+
+def short_name(full_name: str) -> str:
+    """«Фамилия Имя» из ФИО."""
+    return " ".join(full_name.split()[:2])
+
+
+def starosta_footer(acts: list[Activity]) -> list[str]:
+    """Сноска к спискам со звёздочками: кто из старост поставил задания."""
+    authors: dict[str, set[str]] = {}
+    for a in acts:
+        if a.by_starosta:
+            authors.setdefault(a.group, set()).add(a.author)
+    lines = []
+    for group, names in sorted(authors.items()):
+        who = ", ".join(sorted(names))
+        lines.append(f"{STAR} — задание от старосты группы {escape(group)}: {escape(who)}")
+    return lines
+
+
+def new_word(a: Activity) -> str:
+    return "Новое" if a.by_starosta else "Новый"
+
+
+def open_button(a: Activity, label: str = "Открыть") -> tuple[str, str] | None:
+    return (label, a.url) if a.url else None
 
 
 def activity_line(a: Activity, now: int) -> str:
     head = f"{icon(a.modname)} <b>{link(a.name, a.url)}</b>"
     if a.course_name:
         head += f"\n    <i>{escape(a.course_name)}</i>"
-    return head + "\n    " + activity_timing(a, now)
+    head += "\n    " + activity_timing(a, now)
+    if a.by_starosta:
+        if a.note:
+            head += f"\n    {escape(a.note)}"
+        head += f"\n    <i>От старосты группы {escape(a.group)}: {escape(a.author)}</i>"
+    return head
 
 
 def activity_timing(a: Activity, now: int) -> str:
@@ -127,6 +160,8 @@ def chunk(lines: list[str], sep: str = "\n") -> list[str]:
 def deadline_status(a: Activity, now: int) -> str:
     """Срок одной строкой для списков по предметам."""
     if a.close_ts is not None and a.close_ts <= now:
+        if a.by_starosta:
+            return f"срок прошёл {fmt_dt(a.close_ts)}"
         return f"срок был {fmt_dt(a.close_ts)}, ещё можно сдать"
     return activity_timing(a, now)
 
@@ -152,7 +187,13 @@ def group_by_course(acts: list[Activity]) -> list[tuple[str, list[Activity]]]:
 def course_deadlines_lines(name: str, acts: list[Activity], now: int) -> list[str]:
     lines = [f"<b>{escape(name)}</b>"]
     for a in sorted(acts, key=lambda a: deadline_order(a, now)):
-        lines.append(f"{kind_name(a).capitalize()}: {link(a.name, a.url)}\n    {deadline_status(a, now)}")
+        if a.by_starosta:
+            line = f"{STAR} Задание: {escape(a.name)}\n    {deadline_status(a, now)}"
+            if a.note:
+                line += f"\n    <i>{escape(a.note)}</i>"
+        else:
+            line = f"{kind_name(a).capitalize()}: {link(a.name, a.url)}\n    {deadline_status(a, now)}"
+        lines.append(line)
     return lines
 
 
@@ -164,6 +205,8 @@ def all_deadlines_view(acts: list[Activity], now: int, synced_at: int | None) ->
         for name, group in group_by_course(acts):
             lines.append("")
             lines += course_deadlines_lines(name, group, now)
+        if footer := starosta_footer(acts):
+            lines += ["", *footer]
     if synced_at:
         lines.append(f"\n<i>Данные СДО на {datetime.fromtimestamp(synced_at, MSK):%H:%M}</i>")
     return chunk(lines)
@@ -171,6 +214,8 @@ def all_deadlines_view(acts: list[Activity], now: int, synced_at: int | None) ->
 
 def course_deadlines_view(name: str, acts: list[Activity], now: int, synced_at: int | None) -> list[str]:
     lines = course_deadlines_lines(name, acts, now) if acts else [f"<b>{escape(name)}</b>", "Сроков нет."]
+    if footer := starosta_footer(acts):
+        lines += ["", *footer]
     if synced_at:
         lines.append(f"\n<i>Данные СДО на {datetime.fromtimestamp(synced_at, MSK):%H:%M}</i>")
     return chunk(lines)
@@ -220,10 +265,10 @@ def render_events(events: list[Event], settings: UserSettings, now: int | None =
         elif isinstance(e, NewActivity) and settings.new_items:
             a = e.activity
             out.append(
-                Outgoing(f"🆕 <b>Новый {kind_name(a)}</b>\n\n{activity_line(a, now)}", ("Открыть", a.url))
+                Outgoing(f"🆕 <b>{new_word(a)} {kind_name(a)}</b>\n\n{activity_line(a, now)}", open_button(a))
             )
         elif isinstance(e, DeadlineChanged) and settings.deadline_changes:
-            out.append(Outgoing(deadline_changed_text(e, now), ("Открыть", e.activity.url)))
+            out.append(Outgoing(deadline_changed_text(e, now), open_button(e.activity)))
         elif isinstance(e, QuizOpened) and settings.openings:
             a = e.activity
             title = "Тест открыт!" if a.is_quiz else "Доступ открыт!"
@@ -238,7 +283,7 @@ def render_events(events: list[Event], settings: UserSettings, now: int | None =
             out.append(
                 Outgoing(
                     f"⏰ <b>До срока осталось {left}</b>\n\n{activity_line(a, now)}",
-                    ("Открыть", a.url),
+                    open_button(a),
                     expires_at=a.close_ts,
                 )
             )

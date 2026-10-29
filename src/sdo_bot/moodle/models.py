@@ -28,10 +28,18 @@ class Activity:
     url: str
     open_ts: int | None = None
     close_ts: int | None = None
+    # Только у заданий старосты (modname "group"): кто поставил, для какой группы, пояснение
+    author: str = ""
+    group: str = ""
+    note: str = ""
 
     @property
     def is_quiz(self) -> bool:
         return self.modname == "quiz"
+
+    @property
+    def by_starosta(self) -> bool:
+        return self.modname == "group"
 
 
 @dataclass(frozen=True)
