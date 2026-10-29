@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from datetime import timedelta, timezone
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # Москва живёт в UTC+3 без перехода на летнее время с 2014 года. Фиксированный сдвиг
 # не зависит от наличия tzdata в контейнере.
@@ -38,9 +39,19 @@ class Settings(BaseSettings):
     # Прокси до api.telegram.org (нужен пакет aiohttp-socks: pip install "sdo-bot[proxy]")
     telegram_proxy: str | None = None
 
+    # Telegram ID через запятую: могут удалять любые идеи (/delidea), например спам
+    admin_ids: Annotated[frozenset[int], NoDecode] = frozenset()
+
     log_level: str = "INFO"
 
     @field_validator("moodle_url")
     @classmethod
     def _strip_slash(cls, v: str) -> str:
         return v.rstrip("/")
+
+    @field_validator("admin_ids", mode="before")
+    @classmethod
+    def _split_ids(cls, v: object) -> object:
+        if isinstance(v, str):
+            return frozenset(int(x) for x in v.replace(" ", "").split(",") if x)
+        return v

@@ -16,7 +16,12 @@ BTN_BY_COURSE = "Дедлайны по предметам"
 BTN_GRADES = "Оценки"
 BTN_SYNC = "Обновить"
 BTN_SETTINGS = "Настройки"
+BTN_IDEAS = "Идеи и предложения"
 BTN_HELP = "Помощь"
+GITHUB_URL = "https://github.com/neek2101/mirea-sdo-bot"
+MENU_BUTTONS = frozenset(
+    {BTN_DEADLINES, BTN_BY_COURSE, BTN_GRADES, BTN_SYNC, BTN_IDEAS, BTN_SETTINGS, BTN_HELP}
+)
 # Подписи прежней клавиатуры: у пользователей она остаётся, пока не придёт новая
 OLD_BUTTONS = {
     "📅 Сроки": BTN_DEADLINES,
@@ -36,9 +41,11 @@ HELP_TEXT = (
     f"{BTN_GRADES} — баллы по дисциплинам\n"
     f"{BTN_SYNC} — проверить СДО прямо сейчас\n"
     f"{BTN_SETTINGS} — какие уведомления присылать\n\n"
+    f"{BTN_IDEAS} — предложить идею или проголосовать за чужие\n\n"
     "/login — войти заново, /logout — выйти и удалить данные.\n\n"
     "🔒 Пароль я не храню: он нужен один раз, чтобы войти через единый вход МИРЭА. "
-    "Сохраняется только зашифрованная сессия СДО."
+    "Сохраняется только зашифрованная сессия СДО.\n\n"
+    f'Исходный код: <a href="{GITHUB_URL}">GitHub</a>'
 )
 
 SETTINGS_LABELS = {
@@ -53,9 +60,9 @@ SETTINGS_LABELS = {
 
 def main_menu() -> ReplyKeyboardMarkup:
     kb = ReplyKeyboardBuilder()
-    for text in (BTN_DEADLINES, BTN_BY_COURSE, BTN_GRADES, BTN_SYNC, BTN_SETTINGS, BTN_HELP):
+    for text in (BTN_DEADLINES, BTN_BY_COURSE, BTN_GRADES, BTN_SYNC, BTN_IDEAS, BTN_SETTINGS, BTN_HELP):
         kb.button(text=text)
-    kb.adjust(2, 2, 2)
+    kb.adjust(2, 2, 2, 1)
     return kb.as_markup(resize_keyboard=True, is_persistent=True)
 
 
