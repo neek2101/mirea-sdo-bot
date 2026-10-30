@@ -145,6 +145,7 @@ class UserSettings:
     materials: bool = True
     grades: bool = True
     moodle_notifications: bool = True  # уведомления самой СДО (колокольчик)
+    browser_tip_shown: bool = False  # подсказку «открывай ссылки в браузере» уже показали
 
     @classmethod
     def from_json(cls, raw: str | None) -> UserSettings:

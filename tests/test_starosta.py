@@ -53,6 +53,7 @@ async def test_starosta_flow(env, storage, vault, session_cookies):  # noqa: F81
     await press("st:req")
     intro = session.texts()[-1]
     assert "администратор бота вручную" in intro and "один студент" in intro and "фото" in intro
+    assert 'href="https://pulse.mirea.ru/services/group"' in intro  # подсказка, где взять доказательство
     await say("я правда староста")
     assert "Нужно фото или файл" in session.texts()[-1]
     await say(photo="proof-photo")

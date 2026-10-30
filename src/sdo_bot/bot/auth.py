@@ -5,14 +5,15 @@ from __future__ import annotations
 import logging
 from contextlib import suppress
 from html import escape
+from pathlib import Path
 
 import httpx
 from aiogram import F, Router
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, FSInputFile, Message, ReplyKeyboardRemove
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from ..app import App
@@ -35,7 +36,7 @@ START_TEXT = (
     "• преподаватель переносит срок;\n"
     "• до срока остаётся мало времени;\n"
     "• в курсе появляются новые материалы или выставлены оценки.\n\n"
-    "По кнопке 📊 покажу текущие баллы по каждой дисциплине.\n\n"
+    "По кнопке «Оценки» покажу текущие баллы по каждой дисциплине.\n\n"
     "Для начала войди через единый вход МИРЭА — тем же логином и паролем, что и на сайте."
 )
 
@@ -52,8 +53,38 @@ async def cmd_start(message: Message, app: App, state: FSMContext) -> None:
         await message.answer(
             "Я на связи и слежу за СДО 👌", reply_markup=await user_menu(app.storage, user.tg_id)
         )
+        await send_browser_tip(message, app, user.tg_id)
         return
     await message.answer(START_TEXT, reply_markup=login_button())
+    await send_browser_tip(message, app, user.tg_id)
+
+
+BROWSER_TIP_IMAGE = Path(__file__).resolve().parent.parent / "assets" / "open_in_browser.jpg"
+BROWSER_TIP = (
+    "<b>Совет</b>\n\n"
+    "Ссылки бота удобнее открывать сразу в браузере, а не во встроенном окне Telegram: "
+    "там СДО работает как обычно и не придётся входить заново каждый раз.\n\n"
+    "Для этого зажми ссылку или кнопку и выбери «Открыть в браузере», как на картинке."
+)
+_tip_file_id: str | None = None  # после первой загрузки Telegram отдаёт id — шлём фото по нему
+
+
+async def send_browser_tip(message: Message, app: App, tg_id: int) -> None:
+    """Один раз каждому: при первом /start или, у старых пользователей, при следующем входе."""
+    global _tip_file_id
+    user = await app.storage.get_user(tg_id)
+    if user is None or user.settings.browser_tip_shown:
+        return
+    photo = _tip_file_id or FSInputFile(BROWSER_TIP_IMAGE)
+    try:
+        sent = await message.answer_photo(photo, caption=BROWSER_TIP)
+    except TelegramAPIError as exc:
+        log.warning("browser tip for %s failed: %s", tg_id, exc)
+        return
+    if isinstance(sent, Message) and sent.photo:
+        _tip_file_id = sent.photo[-1].file_id
+    user.settings.browser_tip_shown = True
+    await app.storage.save_settings(tg_id, user.settings)
 
 
 async def cmd_help(message: Message) -> None:
@@ -176,6 +207,7 @@ async def _finish(message: Message, app: App, cookies: list[StoredCookie], progr
         await message.answer("Меню — внизу 👇", reply_markup=await user_menu(app.storage, tg_id))
     else:
         await message.answer("Снова на связи 👌", reply_markup=await user_menu(app.storage, tg_id))
+    await send_browser_tip(message, app, tg_id)
 
 
 # ---- запасной вход по cookie ----------------------------------------------------------------
