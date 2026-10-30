@@ -17,6 +17,7 @@ from aiogram.methods import (
     EditMessageReplyMarkup,
     EditMessageText,
     SendMessage,
+    SendPhoto,
     TelegramMethod,
 )
 from aiogram.types import CallbackQuery, Chat, Message, PhotoSize, Update, User
@@ -121,8 +122,12 @@ async def test_full_login_flow_and_menu(env, storage):
     session, say, press, _ = env
 
     await say("/start")
-    [start] = session.take()
+    start, tip = session.take()
     assert "Привет" in start.text and start.reply_markup.inline_keyboard[0][0].callback_data == "login"
+    # Подсказка «открывай ссылки в браузере» с картинкой — один раз
+    assert isinstance(tip, SendPhoto) and "Открыть в браузере" in tip.caption
+    await say("/start")
+    assert not any(isinstance(m, SendPhoto) for m in session.take())
 
     await press("login")
     assert any("Введи логин" in t for t in session.texts())
