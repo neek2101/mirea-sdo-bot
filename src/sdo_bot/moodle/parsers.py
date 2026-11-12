@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urljoin, urlsplit
 
 from bs4 import BeautifulSoup, Tag
 
-from .models import CourseGrade, GradeItem
+from .models import CourseGrade, GradeItem, clean_course_name
 
 # Скрытый текст для скринридеров, иконки и меню действий не должны попадать в значения
 _NOISE = ".sr-only, .accesshide, .visually-hidden, .action-menu, .dropdown, script, style, img, i.icon"
@@ -67,7 +67,8 @@ def parse_overview(html: str, base_url: str) -> list[CourseGrade]:
         course_id = _query_int(href, "id")
         if course_id is None:
             continue
-        result.append(CourseGrade(course_id, _text(link) or _text(cells[0]), _text(cells[1]), href))
+        name = clean_course_name(_text(link) or _text(cells[0]))
+        result.append(CourseGrade(course_id, name, _text(cells[1]), href))
     return result
 
 
@@ -92,6 +93,7 @@ def parse_user_report(html: str) -> list[GradeItem]:
             key = f"{key}#{len(items)}"
         seen.add(key)
         is_total = bool(name_cell.select_one(".courseitem") or "courseitem" in (name_cell.get("class") or []))
+        href = str(link["href"]) if link else ""
         items.append(
             GradeItem(
                 key=str(key),
@@ -100,6 +102,7 @@ def parse_user_report(html: str) -> list[GradeItem]:
                 range=_text(tr.select_one(".column-range")),
                 percentage=_text(tr.select_one(".column-percentage")),
                 is_total=is_total,
+                cmid=_query_int(href, "id") if "/mod/" in href else None,
             )
         )
     return items

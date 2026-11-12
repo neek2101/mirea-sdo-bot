@@ -41,7 +41,16 @@ from .events import (
     Welcome,
 )
 from .moodle import MoodleAPI, MoodleClient, MoodleError, SessionExpired, StoredCookie, silent_relogin
-from .moodle.models import Activity, Course, CourseGrade, GradeItem, Module, Notification, SiteInfo
+from .moodle.models import (
+    Activity,
+    Course,
+    CourseGrade,
+    GradeItem,
+    Module,
+    Notification,
+    SiteInfo,
+    max_points,
+)
 from .moodle.sso import SSO_HOSTS
 from .render import render_events
 from .security import Vault
@@ -210,6 +219,7 @@ class SyncService:
                 snap.reports[cg.course_id] = await attempt(
                     f"оценки курса {cg.course_id}", api.course_grade_items(cg.course_id)
                 )
+        await self._fill_max_grades(api, snap, state)
         user_id = snap.site.user_id if snap.site else user.moodle_user_id
         if user_id:
             snap.notifications = await attempt("уведомления", api.notifications(user_id))
@@ -217,6 +227,41 @@ class SyncService:
             snap.group = await attempt("группа", api.my_group([c.id for c in snap.courses]))
             snap.group_checked = True
         return snap
+
+    @staticmethod
+    async def _fill_max_grades(api: MoodleAPI, snap: Snapshot, state: SyncState) -> None:
+        """Максимум баллов за тесты и задания — из журнала оценок курса (столбец «Диапазон»).
+
+        Журнал курса читаем, только если в нём есть работа, для которой максимум ещё не
+        смотрели (новая), или если журнал и так загружен из-за новых оценок.
+        """
+        if not snap.activities:
+            return
+        for a in snap.activities:
+            old = state.activities.get(a.key)
+            if old is not None:
+                a.max_grade = old.activity.max_grade
+        # Свой словарь, не snap.reports: те журналы сравниваются с прошлыми оценками,
+        # и лишний журнал тихо обновил бы точку отсчёта без уведомления о новой оценке
+        reports = dict(snap.reports)
+        need = {a.course_id for a in snap.activities if a.max_grade is None and a.course_id}
+        for cid in sorted(need - reports.keys()):
+            try:
+                reports[cid] = await api.course_grade_items(cid)
+            except MoodleError as exc:
+                if isinstance(exc, SessionExpired):
+                    raise
+                # 404 — у курса нет журнала (как у «Как учиться в электронной среде»): баллов нет.
+                # Прочие сбои не страшны: попробуем при следующем опросе.
+                reports[cid] = [] if exc.errorcode == "404" else None
+            except httpx.HTTPError:
+                reports[cid] = None
+        for a in snap.activities:
+            items = reports.get(a.course_id)
+            if items is None:
+                continue  # журнал не загружен — оставляем, что было
+            points = {it.cmid: max_points(it.range) for it in items if it.cmid}
+            a.max_grade = points.get(a.cmid, "") if a.cmid else ""
 
     # ---- напоминания (без сети, по сохранённым данным) ------------------------------------
 
@@ -292,6 +337,12 @@ def _diff_activities(
                 informed = True
             elif old.activity.close_ts != a.close_ts and a.close_ts is not None:
                 events.append(DeadlineChanged(a, old.activity.close_ts))
+                informed = True
+            if old is not None and old.activity.locked(now) and not a.locked(now) and not a.open_ts:
+                # Ограничение доступа сняли. Тесты со временем открытия объявляет таймер
+                # (_time_events), здесь — только те, у которых в календаре одна дата срока
+                if a.close_ts is None or a.close_ts > now:
+                    events.append(QuizOpened(a))
                 informed = True
         if informed:
             # Пользователь только что увидел срок — не дублируем «уже наступившими»
@@ -388,7 +439,8 @@ def _time_events(a: Activity, thresholds: list[int], now: int) -> list[tuple[str
     out: list[tuple[str, int, Event]] = []
     if a.open_ts and a.open_ts <= now and (a.close_ts is None or a.close_ts > now):
         out.append(("opened", a.open_ts, QuizOpened(a)))
-    if a.close_ts and a.close_ts > now and (a.open_ts is None or a.open_ts <= now):
+    if a.close_ts and a.close_ts > now and (a.open_ts is None or a.open_ts <= now) and not a.locked(now):
+        # Закрытую работу не торопим: о ней скажем, когда СДО её откроет
         due = [h for h in sorted(thresholds) if a.close_ts - now <= h * 3600]
         if due:
             out.append((f"remind:{due[0]}", a.close_ts, Reminder(a, due[0])))
@@ -410,11 +462,11 @@ def split_activities(acts: list[Activity], now: int) -> tuple[list[Activity], li
     for a in acts:
         if a.close_ts is not None and a.close_ts <= now:
             overdue.append(a)
-        elif a.open_ts is not None and a.open_ts > now:
+        elif (a.open_ts is not None and a.open_ts > now) or a.locked(now):
             upcoming.append(a)
         else:
             active.append(a)
     active.sort(key=lambda a: a.close_ts or 2**62)
-    upcoming.sort(key=lambda a: a.open_ts or 0)
+    upcoming.sort(key=lambda a: a.open_ts or a.close_ts or 2**62)
     overdue.sort(key=lambda a: a.close_ts or 0)
     return active, upcoming, overdue

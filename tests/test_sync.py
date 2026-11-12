@@ -242,3 +242,42 @@ async def test_session_dying_mid_sync_loses_no_events(sync, logged_in, moodle):
     moodle.expire_on = "/grade/report/user/index.php"
     result = await sync.sync_user(logged_in, now=NOW + 600)
     assert {type(e).__name__ for e in result.events} >= {"NewActivity", "GradeChanged"}
+
+
+async def test_max_points_come_from_gradebook_by_cmid(sync, logged_in, moodle, storage):
+    result = await sync.sync_user(logged_in, now=NOW)
+    w: Welcome = result.events[0]
+    points = {a.name: a.max_grade for a in [*w.active, *w.upcoming]}
+    # В журнале строки названы иначе, чем в календаре, — сопоставляем по id элемента курса
+    assert points == {"Контрольная №1": "10", "Лабораторная 1": "", "Тест по механике": "10"}
+    stored = await storage.activities(logged_in)
+    assert stored["quiz:101"].activity.max_grade == "10"
+
+    # Максимум уже известен — журналы курсов ради баллов больше не читаем
+    moodle.log.clear()
+    await sync.sync_user(logged_in, now=NOW + 60)
+    assert not [p for p in moodle.log if "/grade/report/user/" in p]
+    stored = await storage.activities(logged_in)
+    assert stored["quiz:101"].activity.max_grade == "10"
+
+
+async def test_locked_work_is_not_running_until_sdo_opens_it(sync, logged_in, moodle):
+    # «Лабораторная 1»: срок в календаре есть, но сдавать ещё нельзя (ограничение доступа)
+    for e in moodle.events:
+        if e["instance"] == 201:
+            e["action"]["actionable"] = False
+    w: Welcome = (await sync.sync_user(logged_in, now=NOW)).events[0]
+    assert [a.name for a in w.active] == ["Контрольная №1"]
+    assert [a.name for a in w.upcoming] == ["Тест по механике", "Лабораторная 1"]
+
+    # Закрытую работу не напоминаем, даже когда срок близко
+    due = await sync.due_reminders(now=NOW + 70 * H)
+    assert not any(e.activity.key == "assign:201" for evs in due.values() for e in evs)
+
+    # СДО открыла приём ответов — сообщаем об этом
+    for e in moodle.events:
+        if e["instance"] == 201:
+            e["action"]["actionable"] = True
+    result = await sync.sync_user(logged_in, now=NOW + 71 * H)
+    opened = [e for e in result.events if isinstance(e, QuizOpened)]
+    assert [e.activity.key for e in opened] == ["assign:201"]

@@ -113,8 +113,26 @@ def open_button(a: Activity, label: str = "Открыть") -> tuple[str, str] |
     return (label, a.url) if a.url else None
 
 
+def points_text(value: str) -> str:
+    """«10» → «10 баллов», «2,5» → «2,5 балла»."""
+    if not value.isdigit():
+        return f"{value} балла"  # дробное: «2,5 балла»
+    n = int(value)
+    if n % 10 == 1 and n % 100 != 11:
+        word = "балл"
+    elif 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        word = "балла"
+    else:
+        word = "баллов"
+    return f"{n} {word}"
+
+
+def points_suffix(a: Activity) -> str:
+    return f" · {points_text(a.max_grade)}" if a.max_grade else ""
+
+
 def activity_line(a: Activity, now: int) -> str:
-    head = f"{icon(a.modname)} <b>{link(a.name, a.url)}</b>"
+    head = f"{icon(a.modname)} <b>{link(a.name, a.url)}</b>{points_suffix(a)}"
     if a.course_name:
         head += f"\n    <i>{escape(a.course_name)}</i>"
     head += "\n    " + activity_timing(a, now)
@@ -131,6 +149,13 @@ def activity_timing(a: Activity, now: int) -> str:
         if a.close_ts:
             s += f", закроется {fmt_dt(a.close_ts)}"
         return s
+    if a.locked(now):
+        closed = {"quiz": "тест пока закрыт", "assign": "приём ответов ещё не открыт"}.get(
+            a.modname, "пока закрыто"
+        )
+        if a.close_ts is None or a.close_ts <= now:
+            return closed
+        return f"{closed} · срок до {fmt_dt(a.close_ts)}"
     if a.close_ts is None:
         return "без срока"
     if a.close_ts <= now:
@@ -160,7 +185,7 @@ def chunk(lines: list[str], sep: str = "\n") -> list[str]:
 def deadline_status(a: Activity, now: int) -> str:
     """Срок одной строкой для списков по предметам."""
     if a.close_ts is not None and a.close_ts <= now:
-        if a.by_starosta:
+        if a.by_starosta or a.locked(now):
             return f"срок прошёл {fmt_dt(a.close_ts)}"
         return f"срок был {fmt_dt(a.close_ts)}, ещё можно сдать"
     return activity_timing(a, now)
@@ -172,6 +197,8 @@ def deadline_order(a: Activity, now: int) -> tuple[int, int]:
         return 2, a.close_ts
     if a.open_ts is not None and a.open_ts > now:
         return 1, a.open_ts
+    if a.locked(now):
+        return 1, a.close_ts or 2**62
     return 0, a.close_ts or 2**62
 
 
@@ -192,7 +219,10 @@ def course_deadlines_lines(name: str, acts: list[Activity], now: int) -> list[st
             if a.note:
                 line += f"\n    <i>{escape(a.note)}</i>"
         else:
-            line = f"{kind_name(a).capitalize()}: {link(a.name, a.url)}\n    {deadline_status(a, now)}"
+            line = (
+                f"{kind_name(a).capitalize()}: {link(a.name, a.url)}{points_suffix(a)}"
+                f"\n    {deadline_status(a, now)}"
+            )
         lines.append(line)
     return lines
 
@@ -340,7 +370,7 @@ def welcome_text(w: Welcome, settings: UserSettings, now: int) -> list[str]:
 
 def deadline_changed_text(e: DeadlineChanged, now: int) -> str:
     a = e.activity
-    lines = [f"🔄 <b>Срок изменён</b>\n\n{icon(a.modname)} <b>{link(a.name, a.url)}</b>"]
+    lines = [f"🔄 <b>Срок изменён</b>\n\n{icon(a.modname)} <b>{link(a.name, a.url)}</b>{points_suffix(a)}"]
     if a.course_name:
         lines.append(f"<i>{escape(a.course_name)}</i>")
     lines.append("")

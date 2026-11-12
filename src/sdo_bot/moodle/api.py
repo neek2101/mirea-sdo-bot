@@ -12,7 +12,17 @@ import re
 from typing import Any
 
 from .client import MoodleClient, MoodleError, SessionExpired
-from .models import Activity, Course, CourseGrade, GradeItem, Module, Notification, SiteInfo
+from .models import (
+    Activity,
+    Course,
+    CourseGrade,
+    GradeItem,
+    Module,
+    Notification,
+    SiteInfo,
+    clean_activity_name,
+    clean_course_name,
+)
 from .parsers import (
     Participant,
     parse_group_options,
@@ -58,7 +68,7 @@ class MoodleAPI:
         return [
             Course(
                 int(c["id"]),
-                html.unescape(c.get("fullname") or c.get("shortname") or str(c["id"])),
+                clean_course_name(html.unescape(c.get("fullname") or c.get("shortname") or str(c["id"]))),
                 c.get("viewurl") or f"{self.base_url}/course/view.php?id={c['id']}",
             )
             for c in d.get("courses", [])
@@ -156,11 +166,15 @@ def merge_events(events: list[dict[str, Any]], base_url: str) -> list[Activity]:
             a = acts[key] = Activity(
                 key=key,
                 modname=mod,
-                name=html.unescape(e.get("activityname") or e.get("name") or "Без названия").strip(),
+                name=clean_activity_name(
+                    html.unescape(e.get("activityname") or e.get("name") or "Без названия")
+                ),
                 course_id=int(course.get("id") or e.get("courseid") or 0),
-                course_name=html.unescape(course.get("fullname") or ""),
+                course_name=clean_course_name(html.unescape(course.get("fullname") or "")),
                 url=e.get("url") or e.get("viewurl") or f"{base_url}/calendar/view.php?view=upcoming",
             )
+        if (e.get("action") or {}).get("actionable") is False:
+            a.available = False
         ts = int(e["timesort"])
         etype = e.get("eventtype")
         if etype == "open":

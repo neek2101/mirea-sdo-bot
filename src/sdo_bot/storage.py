@@ -17,10 +17,10 @@ from pathlib import Path
 
 import aiosqlite
 
-from .moodle.models import Activity, Module
+from .moodle.models import Activity, Module, clean_course_name
 from .outgoing import Outgoing
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 OUTBOX_TTL = 3 * 86400  # обычные сообщения живут в очереди трое суток
 GROUP_TASK_TTL = 86400  # задание старосты исчезает через сутки после срока
 
@@ -50,6 +50,8 @@ CREATE TABLE IF NOT EXISTS activities (
     open_ts     INTEGER,
     close_ts    INTEGER,
     status      TEXT NOT NULL DEFAULT 'pending',   -- pending | done
+    max_grade   TEXT,                              -- максимум баллов; NULL — не смотрели
+    available   INTEGER NOT NULL DEFAULT 1,        -- 0 — в СДО ещё нельзя начать/сдать
     PRIMARY KEY (tg_id, key)
 );
 -- Что уже отправлено: напоминания, «тест открыт». ts — срок, к которому относится отметка,
@@ -297,6 +299,14 @@ class Storage:
         if "role" not in columns:
             await db.execute("ALTER TABLE starostas ADD COLUMN role TEXT NOT NULL DEFAULT 'starosta'")
             await db.execute("ALTER TABLE starostas ADD COLUMN wants_deputy INTEGER")
+        # v4: максимум баллов за работу
+        async with db.execute("PRAGMA table_info(activities)") as cur:
+            columns = {r["name"] for r in await cur.fetchall()}
+        if "max_grade" not in columns:
+            await db.execute("ALTER TABLE activities ADD COLUMN max_grade TEXT")
+        # v5: доступна ли работа
+        if "available" not in columns:
+            await db.execute("ALTER TABLE activities ADD COLUMN available INTEGER NOT NULL DEFAULT 1")
         await db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         await db.commit()
         return cls(db)
@@ -630,13 +640,14 @@ class Storage:
             if ch.activities is not None:
                 await db.executemany(
                     """INSERT INTO activities (tg_id, key, modname, name, course_id, course_name, url,
-                                               open_ts, close_ts, status)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                                               open_ts, close_ts, status, max_grade, available)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
                        ON CONFLICT (tg_id, key) DO UPDATE SET
                          modname = excluded.modname, name = excluded.name,
                          course_id = excluded.course_id, course_name = excluded.course_name,
                          url = excluded.url, open_ts = excluded.open_ts, close_ts = excluded.close_ts,
-                         status = 'pending'""",
+                         status = 'pending', max_grade = COALESCE(excluded.max_grade, max_grade),
+                         available = excluded.available""",
                     [
                         (
                             tg_id,
@@ -648,6 +659,8 @@ class Storage:
                             a.url,
                             a.open_ts,
                             a.close_ts,
+                            a.max_grade,
+                            int(a.available),
                         )
                         for a in ch.activities
                     ],
@@ -710,7 +723,7 @@ class Storage:
             "SELECT name FROM grades WHERE tg_id = ? AND course_id = ? AND item_key = ''", (tg_id, course_id)
         ) as cur:
             row = await cur.fetchone()
-        return row[0] if row else None
+        return clean_course_name(row[0]) if row else None
 
     # ---- очередь сообщений --------------------------------------------------------------------
 
@@ -771,10 +784,12 @@ def _activity(r: aiosqlite.Row) -> Activity:
         modname=r["modname"],
         name=r["name"],
         course_id=r["course_id"],
-        course_name=r["course_name"],
+        course_name=clean_course_name(r["course_name"]),
         url=r["url"],
         open_ts=r["open_ts"],
         close_ts=r["close_ts"],
+        max_grade=r["max_grade"],
+        available=bool(r["available"]),
     )
 
 
@@ -816,7 +831,7 @@ def _group_task(r: aiosqlite.Row) -> GroupTask:
         author_tg=r["author_tg"],
         author_name=r["author_name"],
         course_id=r["course_id"],
-        course_name=r["course_name"],
+        course_name=clean_course_name(r["course_name"]),
         title=r["title"],
         note=r["note"],
         deadline=r["deadline"],

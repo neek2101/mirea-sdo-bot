@@ -2,7 +2,42 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+
+_PART = re.compile(r"\(\s*ч(?:асть|\.)\s*[\d/ ]*\)", re.I)  # «(часть 1/2)», «(часть 2)»
+_SEMESTER = re.compile(r"\[[^\]]*\]")  # «[I.26-27]»
+_PARENS = re.compile(r"\(([^()]*)\)")
+
+
+def clean_course_name(name: str) -> str:
+    """«Программирование_Зачет (часть 1/2) [I.26-27]» → «Программирование — Зачет».
+
+    Служебные «(часть …)» и «[семестр]» убираем целиком, у прочих скобок оставляем
+    только содержимое, подчёркивание СДО ставит между предметом и формой контроля.
+    """
+    s = _SEMESTER.sub(" ", _PART.sub(" ", name))
+    s = _PARENS.sub(r" \1 ", s)
+    s = re.sub(r"\s*_+\s*", " — ", s)
+    s = re.sub(r"\s+", " ", s).strip(" —")
+    return s or name.strip()
+
+
+def clean_activity_name(name: str) -> str:
+    """Подчёркивания в названиях работ («отчет на проверку_ Иванова») — пробелы."""
+    s = re.sub(r"\s+", " ", name.replace("_", " ")).strip()
+    return s or name.strip()
+
+
+def max_points(grade_range: str) -> str:
+    """Максимум из столбца «Диапазон» отчёта об оценках: «0–10» → «10», «0,00–2,50» → «2,5»."""
+    m = re.search(r"[–—-]\s*(\d+(?:[.,]\d+)?)\s*$", grade_range or "")
+    if not m:
+        return ""  # шкала («Зачтено»/«Отлично») или пусто
+    value = m.group(1).replace(".", ",")
+    if "," in value:
+        value = value.rstrip("0").rstrip(",")
+    return value
 
 
 @dataclass(frozen=True)
@@ -32,6 +67,20 @@ class Activity:
     author: str = ""
     group: str = ""
     note: str = ""
+    # Максимум баллов из журнала оценок: None — ещё не смотрели, "" — в журнале нет
+    max_grade: str | None = None
+    # Можно ли уже начать тест/сдать задание: action.actionable события календаря СДО.
+    # False у работ с ограничением доступа и у заданий, где приём ответов ещё не начался
+    available: bool = True
+
+    def locked(self, now: int) -> bool:
+        """Срок в календаре есть, а работа ещё закрыта, и время открытия СДО не сообщила."""
+        return not self.available and not (self.open_ts and self.open_ts > now)
+
+    @property
+    def cmid(self) -> int | None:
+        m = re.search(r"/mod/\w+/view\.php\?(?:.*&)?id=(\d+)", self.url)
+        return int(m.group(1)) if m else None
 
     @property
     def is_quiz(self) -> bool:
@@ -63,6 +112,7 @@ class GradeItem:
     range: str = ""
     percentage: str = ""
     is_total: bool = False
+    cmid: int | None = None  # элемент курса, если строка ссылается на тест/задание
 
     @property
     def has_grade(self) -> bool:
