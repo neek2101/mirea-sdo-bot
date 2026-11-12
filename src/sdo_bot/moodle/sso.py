@@ -165,7 +165,7 @@ class KeycloakAuth:
             if host_of(url) not in SSO_HOSTS or _foreign_form(r.text, url):
                 return AuthResult(True, "ok")
             html, page = r.text, _page_id(r.text)
-            log.info("keycloak page %r", page)
+            log.info("keycloak page %r: %s", page, _kc_error(html) or "-")
             action = _login_action(html)
             if "required-action" in url and action:
                 # Обязательное действие (привязать «МАКС» и т. п.) — пропускаем, как кнопка «Позже»

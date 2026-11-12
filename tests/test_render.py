@@ -88,3 +88,65 @@ def test_empty_env_values_mean_unset(monkeypatch, tmp_path):
         monkeypatch.delenv(name, raising=False)
     s = Settings()
     assert s.mirea_proxy is None and s.telegram_proxy is None
+
+
+def test_course_names_lose_part_semester_and_underscores():
+    from sdo_bot.moodle.models import clean_course_name
+
+    cases = {
+        "Программирование_Зачет (часть 1/2) [I.26-27]": "Программирование — Зачет",
+        "Философия_Экзамен 2 курс (часть 1/1) [I.26-27]": "Философия — Экзамен 2 курс",
+        "Ознакомительная практика (часть 1/2) [I.26-27] УИБО": "Ознакомительная практика УИБО",
+        "Иностранный язык БРС (часть 2) [II.25-26]": "Иностранный язык БРС",
+        "Системы ИИ ИТУ (управление) (часть 1/2) [I.26-27]": "Системы ИИ ИТУ управление",
+        "Как учиться в электронной среде": "Как учиться в электронной среде",
+    }
+    for raw, clean in cases.items():
+        assert clean_course_name(raw) == clean
+        assert clean_course_name(clean) == clean  # повторная чистка ничего не портит
+
+
+def test_max_points_and_wording():
+    from sdo_bot.moodle.models import max_points
+    from sdo_bot.render import points_text
+
+    assert [max_points(r) for r in ("0–10", "0,00–2,50", "0-100", "Шкала", "")] == [
+        "10",
+        "2,5",
+        "100",
+        "",
+        "",
+    ]
+    assert [points_text(v) for v in ("1", "3", "10", "11", "21", "2,5")] == [
+        "1 балл",
+        "3 балла",
+        "10 баллов",
+        "11 баллов",
+        "21 балл",
+        "2,5 балла",
+    ]
+
+
+def test_points_shown_in_deadlines_and_notifications():
+    from dataclasses import replace
+
+    from sdo_bot.render import all_deadlines_view
+
+    quiz = replace(QUIZ, max_grade="10")
+    [text] = all_deadlines_view([quiz], NOW, None)
+    assert "КР &lt;1&gt;</a> · 10 баллов" in text
+    [msg] = render_events([NewActivity(quiz)], UserSettings(), now=NOW)
+    assert "· 10 баллов" in msg.text
+    [text] = all_deadlines_view([QUIZ], NOW, None)  # максимум не известен — без хвоста
+    assert "балл" not in text
+
+
+def test_locked_work_shown_as_closed_not_running():
+    from dataclasses import replace
+
+    from sdo_bot.render import all_deadlines_view
+
+    locked = replace(QUIZ, open_ts=None, available=False)
+    [text] = all_deadlines_view([locked], NOW, None)
+    assert "тест пока закрыт · срок до" in text
+    assert "осталось" not in text
